@@ -712,3 +712,9 @@ with tabs[8]:
 
 st.divider()
 st.caption("MISHARP CRM OS · 카페24 실시간 연동이 없더라도, 같은 형식의 파일을 정기 업로드하면 전략을 이어갈 수 있도록 설계했습니다.")
+
+
+# Footer
+import streamlit as st
+st.markdown('---')
+st.markdown('made by MISHARP, MIYAWA')
