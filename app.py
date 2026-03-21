@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 from datetime import datetime
 import numpy as np
@@ -9,6 +10,10 @@ APP_TITLE = "MISHARP CRM OS"
 BASE_DIR = Path(__file__).resolve().parent
 SNAPSHOT_DIR = BASE_DIR / "snapshots"
 SNAPSHOT_DIR.mkdir(exist_ok=True)
+MAIL_QUEUE_DIR = BASE_DIR / "mail_queue"
+MAIL_QUEUE_DIR.mkdir(exist_ok=True)
+MAIL_LOG_DIR = BASE_DIR / "mail_logs"
+MAIL_LOG_DIR.mkdir(exist_ok=True)
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
 
@@ -508,6 +513,184 @@ def render_strategy_box(seg_key: str, subset: pd.DataFrame, title: str = "실행
 st.title("📈 MISHARP CRM OS")
 st.caption("엑셀 업로드 → 자동 세그먼트 → 실행 리스트 → 스냅샷 비교까지 한 번에 관리합니다.")
 
+
+
+def get_secret(name: str, default: str = "") -> str:
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.getenv(name, default)
+
+
+def valid_email(series: pd.Series) -> pd.Series:
+    return series.astype(str).str.contains(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", regex=True, na=False)
+
+
+def get_newsletter_targets(df: pd.DataFrame, segment: str, exclude_bad: bool = True) -> pd.DataFrame:
+    sub = df[df["세그먼트"] == segment].copy()
+    if exclude_bad:
+        sub = sub[~sub["불량회원"]]
+    sub = sub[sub["발송가능_이메일"]].copy()
+    sub = sub[valid_email(sub["이메일"])].copy()
+    return sub
+
+
+def build_newsletter_subjects(segment: str, event_title: str) -> list[str]:
+    base = {
+        "신규 가입 후 미구매": [f"처음 만나보시기 좋은 {event_title}", f"실패 적은 미샵 입문 추천 · {event_title}", f"미샵 첫 구매, {event_title}로 시작해보세요"],
+        "첫 구매 후 재구매 대기": [f"지난번 만족하셨다면, 이번엔 {event_title}", f"다시 찾게 되는 미샵 추천 · {event_title}", f"한 번 더 만족하실 코디 제안 · {event_title}"],
+        "최근 방문·미구매": [f"눈여겨보신 분들께 · {event_title}", f"지금 많이 찾는 미샵 추천 · {event_title}", f"코디 고민 줄여드릴 {event_title}"],
+        "활성 재구매 고객": [f"이번 주 미샵 추천 · {event_title}", f"자주 찾으시는 고객님께 · {event_title}", f"지금 가장 반응 좋은 {event_title}"],
+        "VIP/고액 활성 고객": [f"VIP 고객님께 먼저 보여드리는 {event_title}", f"미샵 프라이빗 추천 · {event_title}", f"먼저 보시면 만족하실 {event_title}"],
+        "고액 이탈 위험": [f"오랜만에 다시 보셔도 좋은 {event_title}", f"미샵이 다시 추천드리는 {event_title}", f"다시 만나보시기 좋은 {event_title}"],
+        "장기 휴면/이탈": [f"지금 다시 시작하기 좋은 {event_title}", f"오랜만에 다시 보셔도 좋은 미샵 · {event_title}", f"가볍게 다시 만나보는 미샵 · {event_title}"],
+    }
+    return base.get(segment, [f"미샵 뉴스레터 · {event_title}", f"이번 주 미샵 소식 · {event_title}", f"미샵 추천 소식 · {event_title}"])
+
+
+def build_preheaders(segment: str) -> list[str]:
+    base = {
+        "신규 가입 후 미구매": ["입문하기 좋은 대표 상품만 골라 준비했습니다.", "첫 구매 부담을 줄여줄 추천 코디를 확인해보세요."],
+        "첫 구매 후 재구매 대기": ["지난 구매와 잘 어울리는 상품을 추천드립니다.", "두 번째 구매가 쉬워지는 미샵 추천을 만나보세요."],
+        "장기 휴면/이탈": ["오랜만에 다시 보셔도 실패 적은 대표 상품만 모았습니다.", "다시 시작하기 좋은 미샵 베스트를 소개드립니다."],
+    }
+    return base.get(segment, ["이번 주 미샵 추천과 이벤트 소식을 확인해보세요.", "미샵이 자신 있게 추천드리는 상품을 만나보세요."])
+
+
+def build_newsletter_html(segment: str, event_title: str, intro: str, products: list[dict], cta_text: str, cta_url: str, footer_note: str) -> str:
+    blocks = []
+    for p in products:
+        if not p.get("name"):
+            continue
+        image_html = f'<img src="{p.get("image_url", "")}" alt="{p["name"]}" style="width:100%;max-width:760px;border:0;display:block;border-radius:12px;">' if p.get("image_url") else ""
+        target_url = p.get("url", cta_url)
+        link_start = f'<a href="{target_url}" style="text-decoration:none;color:inherit;">' if target_url else ""
+        link_end = '</a>' if link_start else ""
+        blocks.append(f"""
+        <tr>
+          <td style=\"padding:0 28px 28px 28px;\">
+            <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border-collapse:collapse;border:1px solid #ececec;border-radius:14px;overflow:hidden;background:#ffffff;\">
+              <tr><td style=\"padding:0;\">{link_start}{image_html}{link_end}</td></tr>
+              <tr><td style=\"padding:22px 22px 8px 22px;font-size:24px;line-height:1.35;font-weight:700;color:#111;\">{link_start}{p['name']}{link_end}</td></tr>
+              <tr><td style=\"padding:0 22px 8px 22px;font-size:16px;line-height:1.7;color:#444;\">{p.get('desc','')}</td></tr>
+              <tr><td style=\"padding:0 22px 22px 22px;font-size:15px;line-height:1.6;color:#666;\">{p.get('tag','')}</td></tr>
+            </table>
+          </td>
+        </tr>""")
+    product_html = "".join(blocks) or '<tr><td style="padding:0 28px 28px 28px;font-size:16px;color:#666;">추천 상품을 입력하면 이 영역이 채워집니다.</td></tr>'
+    cta_button = f'<a href="{cta_url}" style="display:inline-block;background:#111;color:#fff;text-decoration:none;padding:16px 30px;border-radius:999px;font-size:16px;font-weight:700;">{cta_text}</a>' if cta_url else ''
+    return f"""
+<!doctype html>
+<html lang=\"ko\">
+  <body style=\"margin:0;padding:0;background:#f6f3ef;font-family:Apple SD Gothic Neo,Pretendard,Malgun Gothic,sans-serif;\">
+    <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f6f3ef;padding:24px 0;\">
+      <tr>
+        <td align=\"center\">
+          <table width=\"900\" cellpadding=\"0\" cellspacing=\"0\" style=\"width:900px;max-width:900px;background:#ffffff;border-collapse:collapse;border-radius:18px;overflow:hidden;\">
+            <tr>
+              <td style=\"padding:34px 28px 18px 28px;text-align:center;background:#fbf8f4;\">
+                <div style=\"font-size:14px;letter-spacing:1.2px;color:#8b7d72;margin-bottom:12px;\">MISHARP NEWSLETTER</div>
+                <div style=\"font-size:36px;line-height:1.35;font-weight:800;color:#111;\">{event_title}</div>
+                <div style=\"margin-top:14px;font-size:17px;line-height:1.8;color:#444;\">{intro}</div>
+              </td>
+            </tr>
+            <tr>
+              <td style=\"padding:18px 28px 8px 28px;font-size:22px;font-weight:700;color:#111;\">이번 주 추천 상품</td>
+            </tr>
+            {product_html}
+            <tr>
+              <td style=\"padding:8px 28px 34px 28px;text-align:center;\">{cta_button}</td>
+            </tr>
+            <tr>
+              <td style=\"padding:24px 28px;background:#fbf8f4;font-size:13px;line-height:1.8;color:#777;text-align:center;\">{footer_note}<br>made by MISHARP, MIYAWA</td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
+
+def get_sendgrid_config() -> dict:
+    return {
+        "api_key": get_secret("SENDGRID_API_KEY"),
+        "from_email": get_secret("SENDGRID_FROM_EMAIL"),
+        "from_name": get_secret("SENDGRID_FROM_NAME", "MISHARP"),
+        "reply_to": get_secret("SENDGRID_REPLY_TO", get_secret("SENDGRID_FROM_EMAIL")),
+    }
+
+
+def send_sendgrid_email(subject: str, html: str, recipients: list[str], preheader: str = "") -> tuple[bool, str]:
+    cfg = get_sendgrid_config()
+    if not cfg["api_key"] or not cfg["from_email"]:
+        return False, "SENDGRID_API_KEY 또는 SENDGRID_FROM_EMAIL 설정이 없습니다."
+    try:
+        from sendgrid import SendGridAPIClient
+        client = SendGridAPIClient(cfg["api_key"])
+        personalizations = [{"to": [{"email": e}]} for e in recipients if e]
+        if not personalizations:
+            return False, "수신자 이메일이 없습니다."
+        payload = {
+            "from": {"email": cfg["from_email"], "name": cfg["from_name"]},
+            "subject": subject,
+            "personalizations": personalizations,
+            "content": [{"type": "text/html", "value": html}],
+        }
+        if cfg.get("reply_to"):
+            payload["reply_to"] = {"email": cfg["reply_to"]}
+        response = client.client.mail.send.post(request_body=payload)
+        return True, f"발송 완료 · status {response.status_code}"
+    except Exception as e:
+        return False, f"발송 실패: {e}"
+
+
+def save_mail_job(job: dict) -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = MAIL_QUEUE_DIR / f"mail_job_{ts}.json"
+    path.write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def list_mail_jobs() -> list[dict]:
+    items = []
+    for p in sorted(MAIL_QUEUE_DIR.glob("mail_job_*.json"), reverse=True):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            d["_path"] = str(p)
+            items.append(d)
+        except Exception:
+            pass
+    return items
+
+
+def run_due_jobs(now_ts: pd.Timestamp | None = None) -> list[dict]:
+    now_ts = now_ts or pd.Timestamp.now()
+    results = []
+    for job in list_mail_jobs():
+        if job.get("status") == "sent":
+            continue
+        due = pd.to_datetime(job.get("scheduled_at"), errors="coerce")
+        if pd.isna(due) or due > now_ts:
+            continue
+        ok, msg = send_sendgrid_email(job.get("subject",""), job.get("html",""), job.get("recipients", []), job.get("preheader",""))
+        job["status"] = "sent" if ok else "failed"
+        job["sent_at"] = datetime.now().isoformat(timespec="seconds")
+        job["result"] = msg
+        Path(job["_path"]).write_text(json.dumps({k: v for k, v in job.items() if k != "_path"}, ensure_ascii=False, indent=2), encoding="utf-8")
+        log_name = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{job['status']}.json"
+        (MAIL_LOG_DIR / log_name).write_text(json.dumps(job, ensure_ascii=False, indent=2), encoding="utf-8")
+        results.append(job)
+    return results
+
+
+def campaign_export_frame(targets: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in ["이름", "아이디", "이메일", "휴대폰번호", "회원등급", "총구매금액", "총 실주문건수", "세그먼트", "권장채널"] if c in targets.columns]
+    return targets[cols].copy()
+
 with st.sidebar:
     st.header("데이터 업로드")
     uploaded = st.file_uploader("회원 CSV / XLSX 업로드", type=["csv", "xlsx", "xls"])
@@ -539,7 +722,7 @@ for i, (k, v) in enumerate(cards.items()):
 
 tabs = st.tabs([
     "CRM 대시보드", "고객 세그먼트", "실행 대상", "이탈 위험", "VIP 관리",
-    "적립금 CRM", "캠페인 추천", "스냅샷 비교", "다운로드"
+    "적립금 CRM", "캠페인 추천", "스냅샷 비교", "다운로드", "뉴스레터 생성", "메일 발송"
 ])
 
 with tabs[0]:
@@ -710,11 +893,124 @@ with tabs[8]:
             f"{name}.csv"
         )
 
+
+
+with tabs[9]:
+    st.subheader("뉴스레터 생성")
+    st.caption("CRM 세그먼트 기준으로 메일 수신 동의 고객을 추출하고, 미샵 뉴스레터 HTML을 자동 생성합니다.")
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        newsletter_segment = st.selectbox("대상 세그먼트", SEGMENT_ORDER, index=1, key="newsletter_segment")
+        exclude_bad_nl = st.checkbox("불량회원 제외", value=True, key="newsletter_ex_bad")
+        event_title = st.text_input("뉴스레터 제목/이벤트명", value=f"이번 주 미샵 추천 · {datetime.now().strftime('%m월 %d일')}")
+        intro = st.text_area("상단 소개 문구", value="이번 주 미샵에서 자신 있게 추천드리는 상품과 이벤트 소식을 준비했습니다. 4050 고객이 편하게, 실패 없이 만나보실 수 있는 상품 위주로 골랐습니다.", height=120)
+        cta_text = st.text_input("CTA 문구", value="추천 상품 보러가기")
+        cta_url = st.text_input("대표 이동 링크", value="https://www.misharp.co.kr/")
+        footer_note = st.text_input("하단 안내 문구", value="본 메일은 미샵 수신 동의 고객님께 발송됩니다. 더 이상 받지 않으시려면 수신 설정을 변경해주세요.")
+    with col_b:
+        targets = get_newsletter_targets(df, newsletter_segment, exclude_bad=exclude_bad_nl)
+        strategy = get_strategy_payload(newsletter_segment)
+        st.metric("발송 가능 이메일 수", f"{len(targets):,}명")
+        st.markdown(f"**추천 이벤트** · {strategy['event']}")
+        st.markdown(f"**추천 매체** · {', '.join(strategy['media'])}")
+        st.markdown(f"**추천 타이밍** · {strategy['timing']}")
+        st.markdown(f"**상품 방향** · {strategy['product']}")
+    st.markdown("### 추천 제목 / 프리헤더")
+    subjects = build_newsletter_subjects(newsletter_segment, event_title)
+    preheaders = build_preheaders(newsletter_segment)
+    s1, s2 = st.columns(2)
+    with s1:
+        selected_subject = st.selectbox("메일 제목 선택", subjects)
+    with s2:
+        selected_preheader = st.selectbox("프리헤더 선택", preheaders)
+    st.markdown("### 추천 상품 입력")
+    products = []
+    for i in range(1, 5):
+        with st.expander(f"상품 {i}", expanded=(i <= 3)):
+            p1, p2 = st.columns(2)
+            with p1:
+                name = st.text_input(f"상품명 {i}", key=f"pname_{i}")
+                url = st.text_input(f"상품 링크 {i}", key=f"purl_{i}", value=cta_url if i == 1 else "")
+            with p2:
+                image_url = st.text_input(f"이미지 URL {i}", key=f"pimg_{i}")
+                tag = st.text_input(f"태그/가격/포인트 {i}", key=f"ptag_{i}")
+            desc = st.text_area(f"설명 {i}", key=f"pdesc_{i}", height=80)
+            products.append({"name": name, "url": url, "image_url": image_url, "tag": tag, "desc": desc})
+    html = build_newsletter_html(newsletter_segment, event_title, intro, products, cta_text, cta_url, footer_note)
+    st.markdown("### 발송 대상 미리보기")
+    st.dataframe(campaign_export_frame(targets.head(300)), use_container_width=True, hide_index=True)
+    dataframe_download(campaign_export_frame(targets), "이메일 발송 대상 CSV 다운로드", f"newsletter_targets_{newsletter_segment}.csv")
+    st.markdown("### HTML 미리보기")
+    st.components.v1.html(html, height=900, scrolling=True)
+    st.download_button("뉴스레터 HTML 다운로드", data=html, file_name="misharp_newsletter.html", mime="text/html")
+    st.session_state["newsletter_html"] = html
+    st.session_state["newsletter_subject"] = selected_subject
+    st.session_state["newsletter_preheader"] = selected_preheader
+
+with tabs[10]:
+    st.subheader("메일 발송")
+    st.caption("SendGrid API를 연결하면 CRM OS 안에서 뉴스레터 테스트 발송, 즉시 발송, 예약 큐 저장까지 처리할 수 있습니다.")
+    cfg = get_sendgrid_config()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("API Key 설정", "완료" if cfg['api_key'] else "미설정")
+    c2.metric("발신 이메일", cfg['from_email'] if cfg['from_email'] else "미설정")
+    c3.metric("발신명", cfg['from_name'])
+    mail_segment = st.selectbox("발송할 세그먼트", SEGMENT_ORDER, index=1, key="mail_segment")
+    exclude_bad_mail = st.checkbox("불량회원 제외", value=True, key="mail_ex_bad")
+    mail_targets = get_newsletter_targets(df, mail_segment, exclude_bad=exclude_bad_mail)
+    st.write(f"발송 가능 이메일: **{len(mail_targets):,}명**")
+    default_subject = st.session_state.get("newsletter_subject") or build_newsletter_subjects(mail_segment, f"이번 주 미샵 추천 · {datetime.now().strftime('%m월 %d일')}")[0]
+    default_preheader = st.session_state.get("newsletter_preheader") or build_preheaders(mail_segment)[0]
+    default_html = st.session_state.get("newsletter_html", "")
+    mail_subject = st.text_input("발송 제목", value=default_subject, key="mail_subject")
+    st.text_input("프리헤더", value=default_preheader, key="mail_preheader")
+    send_html = st.text_area("발송용 HTML", value=default_html, height=280, key="mail_html")
+    test_email = st.text_input("테스트 이메일", value=cfg['from_email'] or "")
+    t1, t2, t3 = st.columns(3)
+    with t1:
+        if st.button("테스트 1건 발송"):
+            ok, msg = send_sendgrid_email(mail_subject, send_html, [test_email])
+            st.success(msg) if ok else st.error(msg)
+    with t2:
+        send_count = st.number_input("즉시 발송 수 (상위 N명)", min_value=1, max_value=max(len(mail_targets), 1), value=min(len(mail_targets), 100))
+        if st.button("즉시 발송"):
+            recipients = mail_targets["이메일"].head(int(send_count)).tolist()
+            ok, msg = send_sendgrid_email(mail_subject, send_html, recipients)
+            st.success(f"{len(recipients):,}명 발송 완료 · {msg}") if ok else st.error(msg)
+    with t3:
+        schedule_time = st.datetime_input("예약 발송 시각")
+        queue_count = st.number_input("예약 수량 (상위 N명)", min_value=1, max_value=max(len(mail_targets), 1), value=min(len(mail_targets), 300), key="queue_count")
+        if st.button("예약 큐 저장"):
+            recipients = mail_targets["이메일"].head(int(queue_count)).tolist()
+            path = save_mail_job({
+                "segment": mail_segment,
+                "subject": mail_subject,
+                "scheduled_at": pd.Timestamp(schedule_time).isoformat(),
+                "status": "queued",
+                "recipient_count": len(recipients),
+                "recipients": recipients,
+                "html": send_html,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            })
+            st.success(f"예약 큐 저장 완료: {path.name}")
+    st.markdown("### 예약 큐 / 발송 이력")
+    jobs = list_mail_jobs()
+    if jobs:
+        st.dataframe(pd.DataFrame([{
+            "파일": Path(j.get("_path", "")).name,
+            "세그먼트": j.get("segment"),
+            "제목": j.get("subject"),
+            "예약시각": j.get("scheduled_at"),
+            "상태": j.get("status", "queued"),
+            "대상수": j.get("recipient_count", 0),
+            "결과": j.get("result", ""),
+        } for j in jobs]), use_container_width=True, hide_index=True)
+        if st.button("지금 시점 기준 예약 작업 실행"):
+            results = run_due_jobs()
+            st.success(f"{len(results)}건 실행 완료") if results else st.info("현재 시점에 실행할 예약 작업이 없습니다.")
+    else:
+        st.info("예약된 메일 작업이 없습니다.")
+
+
 st.divider()
-st.caption("MISHARP CRM OS · 카페24 실시간 연동이 없더라도, 같은 형식의 파일을 정기 업로드하면 전략을 이어갈 수 있도록 설계했습니다.")
-
-
-# Footer
-import streamlit as st
-st.markdown('---')
-st.markdown('made by MISHARP, MIYAWA')
+st.caption("MISHARP CRM OS · 카페24 실시간 연동이 없더라도, 같은 형식의 파일을 정기 업로드하면 전략을 이어갈 수 있도록 설계했습니다. · made by MISHARP, MIYAWA")
