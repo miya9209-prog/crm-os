@@ -1,31 +1,31 @@
+# MISHARP CRM OS
 
-# MISHARP CRM OS + Newsletter
+카페24 회원 CSV/XLSX를 주기적으로 업로드해서 CRM 세그먼트, 실행 대상 리스트, 스냅샷 비교를 관리하는 Streamlit 앱입니다.
 
-## 실행
+## 핵심 기능
+- 회원 파일 업로드 (CSV / XLSX)
+- 자동 세그먼트 분류
+- 실행 채널 분리 (SMS / 앱푸시 / 이메일 / 분석만)
+- 이탈 위험, VIP, 적립금 타겟 추출
+- 스냅샷 저장 및 이전 업로드와 비교
+- CSV 다운로드
+
+## 실행 방법
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## 주요 기능
-- CRM 세그먼트 자동 분류
-- 불량회원 제외 / 휴면복귀 분석
-- 고객군별 전략·문구 추천
-- 이메일 뉴스레터 HTML 자동 생성
-- SendGrid 테스트 발송 / 즉시 발송 / 예약 큐 저장
-- `mailer_worker.py`로 예약 큐 실행
+## 권장 운영 방식
+1. 카페24에서 회원 전체 데이터를 주 1회 또는 월 2회 추출합니다.
+2. 이 앱에 업로드합니다.
+3. 필요한 리스트를 다운로드해 문자/앱/이메일 캠페인에 사용합니다.
+4. 업로드 시마다 스냅샷을 저장해 이전 상태와 비교합니다.
 
-## 예약 발송
-예약 저장 후 아래 스크립트를 주기적으로 실행하세요.
-```bash
-python mailer_worker.py
-```
-Windows 작업 스케줄러 또는 cron에서 5분 간격으로 실행하면 됩니다.
+## 스냅샷
+- 앱 내부 `snapshots/` 폴더에 저장됩니다.
+- 실시간 연동이 없더라도 CRM 흐름을 이어갈 수 있도록 만든 구조입니다.
 
-## 환경변수 또는 Streamlit secrets
-- SENDGRID_API_KEY
-- SENDGRID_FROM_EMAIL
-- SENDGRID_FROM_NAME
-- SENDGRID_REPLY_TO
-
-`.streamlit/secrets.toml.example`를 참고해 `.streamlit/secrets.toml`을 만드세요.
+## 주의
+- 업로드 파일의 컬럼명이 카페24 기본 양식과 크게 다르면 일부 지표가 비어 보일 수 있습니다.
+- `EXPECTED_COLS`를 기준으로 필요한 컬럼을 보완할 수 있습니다.
